@@ -1,0 +1,150 @@
+import {
+  Injectable,
+  ConflictException,
+  ForbiddenException,
+  BadRequestException,
+} from '@nestjs/common';
+import { Rol } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class CitasService {
+  constructor(private prisma: PrismaService) {}
+
+  async findAllByUser(user: {
+    sub: number;
+    rol: Rol;
+  }) {
+    if (user.rol === Rol.ADMIN) {
+      return this.prisma.cita.findMany({
+        include: {
+          paciente: true,
+          profesional: true,
+        },
+        orderBy: {
+          fechaHora: 'asc',
+        },
+      });
+    }
+
+    const paciente = await this.prisma.paciente.findUnique({
+      where: {
+        usuarioId: user.sub,
+      },
+    });
+
+    if (!paciente) {
+      throw new ForbiddenException('No tiene perfil de paciente');
+    }
+
+    return this.prisma.cita.findMany({
+      where: {
+        pacienteId: paciente.id,
+      },
+      include: {
+        paciente: true,
+        profesional: true,
+      },
+      orderBy: {
+        fechaHora: 'asc',
+      },
+    });
+  }
+
+  async create(
+    data: {
+      fechaHora: string;
+      pacienteId?: number;
+      profesionalId: number;
+    },
+    user: {
+      sub: number;
+      email: string;
+      rol: Rol;
+    },
+  ) {
+    const fecha = new Date(data.fechaHora);
+
+    this.validarHorario(fecha);
+
+    let pacienteIdFinal = data.pacienteId;
+
+    if (user.rol === Rol.PACIENTE) {
+      const paciente = await this.prisma.paciente.findUnique({
+        where: {
+          usuarioId: user.sub,
+        },
+      });
+
+      if (!paciente) {
+        throw new ForbiddenException('Este usuario no tiene perfil de paciente');
+      }
+
+      pacienteIdFinal = paciente.id;
+    }
+
+    if (user.rol === Rol.ADMIN) {
+      if (!pacienteIdFinal) {
+        throw new BadRequestException('El admin debe indicar un pacienteId');
+      }
+    }
+
+    if (!pacienteIdFinal) {
+      throw new BadRequestException('Falta pacienteId');
+    }
+
+    const citaExistente = await this.prisma.cita.findFirst({
+      where: {
+        fechaHora: fecha,
+        profesionalId: data.profesionalId,
+      },
+    });
+
+    if (citaExistente) {
+      throw new ConflictException('Ese horario ya está ocupado');
+    }
+
+    return this.prisma.cita.create({
+      data: {
+        fechaHora: fecha,
+        pacienteId: pacienteIdFinal,
+        profesionalId: data.profesionalId,
+      },
+      include: {
+        paciente: true,
+        profesional: true,
+      },
+    });
+  }
+
+  private validarHorario(fecha: Date) {
+    if (Number.isNaN(fecha.getTime())) {
+      throw new BadRequestException('Fecha inválida');
+    }
+
+    const ahora = new Date();
+
+    if (fecha < ahora) {
+      throw new BadRequestException('No se pueden crear citas en el pasado');
+    }
+
+    const hora = fecha.getUTCHours();
+    const minuto = fecha.getUTCMinutes();
+
+    const minutosDelDia = hora * 60 + minuto;
+    const inicio = 9 * 60 + 30;
+    const fin = 18 * 60;
+
+    if (minutosDelDia < inicio || minutosDelDia >= fin) {
+      throw new BadRequestException('Horario fuera del rango permitido');
+    }
+
+    const diferencia = minutosDelDia - inicio;
+
+    if (diferencia % 20 !== 0) {
+      throw new BadRequestException(
+        'La cita debe respetar bloques de 20 minutos desde las 09:30',
+      );
+    }
+  }
+}
